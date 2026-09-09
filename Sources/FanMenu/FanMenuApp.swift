@@ -45,7 +45,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         model.onUpdate = { [weak self] in self?.paint() }
-        Task { await model.refresh(); self.paint() }
+        Task {
+            await self.model.refresh()
+            if await self.model.helperOutdatedOrDown() { await self.model.ensureHelper() }
+            self.paint()
+        }
         timer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 guard let self else { return }
@@ -160,6 +164,8 @@ final class FanModel: ObservableObject {
     @Published var daemonUp = false
     @Published var openAtLogin = (SMAppService.mainApp.status == .enabled)
     var onUpdate: (() -> Void)?
+    /// Must match fand `daemonAPIVersion`. Missing/old helpers get replaced.
+    static let requiredHelperVersion = 3
     /// While a Max/Auto request is in flight, the 2s poll must not overwrite the icon.
     private enum Pending { case none, max, auto }
     private var pending: Pending = .none
@@ -278,6 +284,39 @@ final class FanModel: ObservableObject {
         await refresh()
     }
 
+    func helperOutdatedOrDown() async -> Bool {
+        guard let s = await api("GET", "/status") else { return true }
+        let v = Self.number(s["version"]).map { Int($0) } ?? 0
+        return v < Self.requiredHelperVersion
+    }
+
+    /// Prompt once for admin and install/replace the LaunchDaemon helper.
+    /// After that launchd keeps it running at boot — the app does not sudo again.
+    func ensureHelper() async {
+        guard let script = Bundle.main.url(forResource: "install-fand", withExtension: "sh")?.path else { return }
+        let bundle = Bundle.main.bundlePath
+        let src = """
+        set s to quoted form of "\(Self.appleEscape(script))"
+        set b to quoted form of "\(Self.appleEscape(bundle))"
+        do shell script (s & " " & b) with administrator privileges
+        """
+        var err: NSDictionary?
+        _ = NSAppleScript(source: src)?.executeAndReturnError(&err)
+        guard err == nil else { return }
+        for _ in 0..<20 {
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            if await api("GET", "/status") != nil, !(await helperOutdatedOrDown()) {
+                daemonUp = true
+                await refresh()
+                return
+            }
+        }
+    }
+
+    private static func appleEscape(_ s: String) -> String {
+        s.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
+    }
+
     func auto() async {
         pending = .auto
         manual = false
@@ -315,7 +354,9 @@ struct FanPopover: View {
             }
 
             if !model.daemonUp {
-                Text("fand not running").font(.caption).foregroundStyle(.secondary)
+                Text("Helper not running").font(.caption).foregroundStyle(.secondary)
+                Button("Install helper…") { Task { await model.ensureHelper() } }
+                    .font(.caption)
             } else if model.manual, model.ttl > 0 {
                 Text("Auto in \(Int(model.ttl / 60))m").font(.caption).foregroundStyle(.secondary)
             }

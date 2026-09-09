@@ -18,14 +18,21 @@ let port: UInt16 = 8765
 let failsafeTemp: Float = 102
 let defaultTTL: TimeInterval = 900
 let maxTTL: TimeInterval = 7200
+/// Bump when helper behavior changes so the app replaces a stale LaunchDaemon.
+/// 3 = target-verified spin-up + unbuffered logging (app 0.3.x).
+let daemonAPIVersion = 3
 
 final class DaemonState: @unchecked Sendable {
     let fc: FanControl
     var expiresAt: Date? = nil
+    /// True after TTL/failsafe until every fan is actually back in auto.
+    var pendingAuto = false
+    var revertBusy = false
     var lastRequest: String = "none"
     let lock = NSLock()
     init(_ fc: FanControl) { self.fc = fc }
     var ttlRemaining: TimeInterval? {
+        lock.lock(); defer { lock.unlock() }
         guard let e = expiresAt else { return nil }
         let r = e.timeIntervalSinceNow
         return r > 0 ? r : 0
@@ -36,15 +43,21 @@ final class DaemonState: @unchecked Sendable {
         guard let e = expiresAt else { return false }
         return e.timeIntervalSinceNow > 0
     }
-    func expiredSnapshot() -> Bool {
+    func shouldRevert() -> Bool {
         lock.lock(); defer { lock.unlock() }
+        if pendingAuto { return true }
         guard let e = expiresAt else { return false }
         return Date() >= e
+    }
+    func isPendingAuto() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return pendingAuto
     }
 }
 
 enum Runtime {
     static var state: DaemonState?
+    static var timer: DispatchSourceTimer?
     static func halt(_ why: String) {
         print("fand: \(why)")
         if let s = state { revertAllToAuto(s) }
@@ -89,35 +102,85 @@ func statusPayload(_ s: DaemonState) -> [String: Any] {
             "fans": fans,
             "topTemps": temps,
             "control": ["manual": s.isManual, "ttlRemaining": s.ttlRemaining ?? 0, "lastRequest": s.lastRequest],
-            "failsafeC": failsafeTemp]
+            "failsafeC": failsafeTemp,
+            "version": daemonAPIVersion]
 }
 
 func revertAllToAuto(_ s: DaemonState) {
-    try? s.fc.setAllAuto()
-    s.lock.synchronized { s.expiresAt = nil }
-    print("fand: reverted to auto")
+    s.lock.lock()
+    if s.revertBusy { s.lock.unlock(); return }
+    s.revertBusy = true
+    s.expiresAt = nil
+    s.pendingAuto = true
+    s.lock.unlock()
+    defer { s.lock.synchronized { s.revertBusy = false } }
+
+    do {
+        try s.fc.setAllAuto()
+        Thread.sleep(forTimeInterval: 0.15)
+    } catch {
+        print("fand: revert write failed (\(error)) — will retry")
+        return
+    }
+    let stuck = s.fc.allFans().filter { $0.mode == 1 }
+    if stuck.isEmpty {
+        s.lock.synchronized { s.pendingAuto = false; s.lastRequest = "auto" }
+        print("fand: reverted to auto")
+    } else {
+        print("fand: revert incomplete (fans \(stuck.map(\.index)) still mode 1) — will retry")
+    }
 }
 
-/// After commanding Max, fans need physical spin-up lag. Poll actual RPM
-/// (up to `waitSeconds`) until every fan reaches 80% of its max.
-/// Returns (spunUp, waitedSeconds).
-func awaitSpinUp(_ s: DaemonState, waitSeconds: TimeInterval = 10) -> (Bool, TimeInterval) {
+/// After commanding Max, fans need physical spin-up lag. Verifies each fan
+/// reached the RPM we actually *commanded* (`F%dTg`, = `F%dMx`), not an absolute
+/// 80% of max: a hot machine already held at 79% by macOS auto used to report
+/// `spunUp` in 0.58s without the write having any measurable effect.
+/// `baseline` is every fan's RPM just before the write, so a no-op is visible
+/// in the response instead of being mistaken for success.
+/// Returns (atTarget, waitedSeconds, per-fan before/after).
+func awaitSpinUp(_ s: DaemonState,
+                 baseline: [(index: Int, rpm: Float)] = [],
+                 waitSeconds: TimeInterval = 10,
+                 tolerance: Float = 0.97) -> (Bool, TimeInterval, [[String: Any]]) {
+    func commanded(_ f: FanInfo) -> Float { f.targetRPM > 0 ? f.targetRPM : f.maxRPM }
+    func reached(_ fans: [FanInfo]) -> Bool {
+        guard !fans.isEmpty else { return false }
+        return fans.allSatisfy { f in
+            let target = commanded(f)
+            guard target > 0 else { return true }
+            return f.actualRPM >= target * tolerance
+        }
+    }
+    func detail(_ fans: [FanInfo]) -> [[String: Any]] {
+        fans.map { f in
+            let before = baseline.first { $0.index == f.index }?.rpm
+            var row: [String: Any] = ["index": f.index,
+                                      "commandedRPM": Double(f.targetRPM),
+                                      "actualRPM": Double(f.actualRPM),
+                                      "reached": reached([f])]
+            if let before {
+                row["beforeRPM"] = Double(before)
+                row["deltaRPM"] = Double(f.actualRPM - before)
+            }
+            return row
+        }
+    }
     let start = Date()
     while Date().timeIntervalSince(start) < waitSeconds {
         let fans = s.fc.allFans()
-        if !fans.isEmpty, fans.allSatisfy({ $0.maxRPM <= 0 || $0.actualRPM >= $0.maxRPM * 0.8 }) {
-            return (true, Date().timeIntervalSince(start))
-        }
+        if reached(fans) { return (true, Date().timeIntervalSince(start), detail(fans)) }
         Thread.sleep(forTimeInterval: 0.5)
     }
     let fans = s.fc.allFans()
-    return (!fans.isEmpty && fans.allSatisfy({ $0.maxRPM <= 0 || $0.actualRPM >= $0.maxRPM * 0.8 }), Date().timeIntervalSince(start))
+    return (reached(fans), Date().timeIntervalSince(start), detail(fans))
 }
 
 func handleRequest(_ s: DaemonState, method: String, path: String, body: Data) -> (Int, [String: Any]) {
     // expire TTL + thermal failsafe (SMC I/O happens OUTSIDE the lock;
-    // revertAllToAuto takes the lock itself, so never call it under lock)
-    if s.expiredSnapshot() { revertAllToAuto(s) }
+    // revertAllToAuto takes the lock itself, so never call it under lock).
+    // Skip on /max and /auto — those commands replace the current state.
+    let isControlPOST = method == "POST" && (path == "/max" || path == "/boost" || path == "/auto")
+    if !isControlPOST, s.shouldRevert() { revertAllToAuto(s) }
     var failsafeHit: Float? = nil
     if s.manualSnapshot() {
         if let hottest = hottestDie(s.fc), hottest >= failsafeTemp {
@@ -137,26 +200,32 @@ func handleRequest(_ s: DaemonState, method: String, path: String, body: Data) -
         return (200, ["model": SMCConnection.hardwareModel(), "count": all.count, "sensors": all])
     }
     if method == "POST", path == "/auto" {
-        do {
-            try s.fc.setAllAuto()
-        } catch {
-            return (500, ["ok": false, "error": "\(error)"] as [String: Any])
+        revertAllToAuto(s)
+        if s.isPendingAuto() {
+            Thread.sleep(forTimeInterval: 0.3)
+            revertAllToAuto(s)
         }
-        s.lock.synchronized { s.expiresAt = nil; s.lastRequest = "auto" }
+        if s.isPendingAuto() {
+            return (500, ["ok": false, "error": "auto write did not stick — retrying"] as [String: Any])
+        }
         return (200, ["ok": true, "status": statusPayload(s)] as [String: Any])
     }
     // Max only. /set is intentionally gone: no custom/low RPM path exists.
     // /max is the canonical name; /boost kept as an alias.
     if method == "POST", path == "/max" || path == "/boost" {
         let ttl = min(max(jsonNumber(b["ttl_seconds"]) ?? defaultTTL, 60), maxTTL)
+        // RPM right before the write — lets the spin-up check prove the fans
+        // actually moved on command rather than already being fast.
+        let baseline = s.fc.allFans().map { (index: $0.index, rpm: $0.actualRPM) }
         do {
             try s.fc.setAllMax()
-            s.lock.synchronized { s.expiresAt = Date().addingTimeInterval(ttl); s.lastRequest = "max" }
-            let (spunUp, waited) = awaitSpinUp(s)
+            s.lock.synchronized { s.expiresAt = Date().addingTimeInterval(ttl); s.pendingAuto = false; s.lastRequest = "max" }
+            let (spunUp, waited, spinCheck) = awaitSpinUp(s, baseline: baseline)
             var payload = statusPayload(s)
             payload["spunUp"] = spunUp
             payload["spinWaitSeconds"] = waited
-            return (200, ["ok": true, "ttl_seconds": ttl, "spunUp": spunUp, "spinWaitSeconds": waited, "status": payload] as [String: Any])
+            payload["spinUpCheck"] = spinCheck
+            return (200, ["ok": true, "ttl_seconds": ttl, "spunUp": spunUp, "spinWaitSeconds": waited, "spinUpCheck": spinCheck, "status": payload] as [String: Any])
         } catch {
             return (500, ["ok": false, "error": "\(error)"] as [String: Any])
         }
@@ -169,13 +238,20 @@ func handleRequest(_ s: DaemonState, method: String, path: String, body: Data) -
 
 // --- TTL expiry timer (body above handles expiry lazily per request too) ---
 func startExpiryTimer(_ s: DaemonState) {
-    Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { _ in
-        if s.expiredSnapshot() { revertAllToAuto(s) }
+    // Dispatch timer — not RunLoop. Timer.scheduledTimer silently never
+    // fired in some launchd contexts, so TTL expiry never ran unless a
+    // client happened to hit /status at the exact second.
+    let t = DispatchSource.makeTimerSource(queue: .global(qos: .utility))
+    t.schedule(deadline: .now() + .seconds(2), repeating: .seconds(2), leeway: .milliseconds(200))
+    t.setEventHandler {
+        if s.shouldRevert() { revertAllToAuto(s) }
         if s.manualSnapshot(), let hottest = hottestDie(s.fc), hottest >= failsafeTemp {
-            revertAllToAuto(s)
             print("fand: FAILSAFE \(hottest)C -> auto")
+            revertAllToAuto(s)
         }
     }
+    t.resume()
+    Runtime.timer = t
 }
 
 // --- Minimal HTTP/1.0 server on 127.0.0.1 via Network.framework ---
@@ -208,6 +284,11 @@ func startHTTP(_ s: DaemonState, port: UInt16) throws {
 
 // --- main ---
 do {
+    // launchd redirects stdout to /var/log/fand.log, which makes print()
+    // block-buffered. The log had not grown since boot while four real events
+    // (including two FAILSAFE reverts) sat unflushed in a 16 KB buffer — the
+    // exact lines you reach for during an incident. Keep the log live.
+    setvbuf(stdout, nil, _IONBF, 0)
     let fc = try FanControl()
     print("fand: model=\(SMCConnection.hardwareModel()) fans=\(fc.fanCount) modeKey=\(fc.hw.modeKeyFormat) ftst=\(fc.hw.ftstAvailable) euid=\(geteuid())")
     if geteuid() != 0 { print("fand: WARNING not root — writes will fail. Run via sudo or install LaunchDaemon.") }

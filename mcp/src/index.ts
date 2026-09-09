@@ -22,7 +22,7 @@ async function fand(method: string, path: string, body?: unknown) {
   return j;
 }
 
-const server = new McpServer({ name: "fancontrol", version: "0.2.0" });
+const server = new McpServer({ name: "fancontrol", version: "0.3.0" });
 
 server.tool("get_thermal_status", "Fans (RPM/mode/range), top die temps, control state + TTL.", {}, async () => {
   try {
@@ -35,11 +35,22 @@ server.tool("get_thermal_status", "Fans (RPM/mode/range), top die temps, control
 
 server.tool(
   "max_fans",
-  "All fans to HARDWARE MAXIMUM for ttl_seconds (pre-cool before builds/inference). Auto-reverts to macOS control after TTL. Waits for physical spin-up and reports it. This is the ONLY speed change available — low/custom speeds are not expressible.",
+  "All fans to HARDWARE MAXIMUM for ttl_seconds (pre-cool before builds/inference). Auto-reverts to macOS control after TTL. Verifies each fan reached the RPM it was commanded to (reports before/after per fan) — a fan that was already fast is no longer mistaken for success. This is the ONLY speed change available; low/custom speeds are not expressible.",
   { ttl_seconds: z.number().int().min(60).max(7200).default(900).describe("Auto-revert to macOS control after this long (default 15 min, max 2 h)") },
   async ({ ttl_seconds }) => {
-    const r = await fand("POST", "/max", { ttl_seconds });
-    return { content: [{ type: "text", text: JSON.stringify(r, null, 2) }] };
+    const r: any = await fand("POST", "/max", { ttl_seconds });
+    const json = JSON.stringify(r, null, 2);
+    if (r && r.spunUp === false) {
+      const stuck = Array.isArray(r.spinUpCheck)
+        ? r.spinUpCheck.filter((f: any) => f.reached === false)
+            .map((f: any) => `fan${f.index}: ${Math.round(f.actualRPM)} of ${Math.round(f.commandedRPM)} rpm`)
+            .join(", ")
+        : "";
+      return {
+        content: [{ type: "text", text: `WARNING: fans did not reach commanded maximum within the spin-up window${stuck ? ` (${stuck})` : ""}. Control is still TTL-guarded and auto-reverts in ${ttl_seconds}s.\n${json}` }],
+      };
+    }
+    return { content: [{ type: "text", text: json }] };
   }
 );
 

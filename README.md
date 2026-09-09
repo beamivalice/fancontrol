@@ -16,12 +16,12 @@ This uses undocumented SMC keys. Firmware thermal protection still applies. Use 
 ## Install
 
 ```bash
-# Menubar app
 ./scripts/install-app.sh
-
-# Root daemon at boot (password once)
-./scripts/install.sh
 ```
+
+Open **Fan Control**. If `fand` is not running it asks for your password **once** and installs a LaunchDaemon. After that the helper starts at boot and is already up when the app opens.
+
+Or install the daemon yourself: `./scripts/install.sh`.
 
 In the menu: **Open at Login**. Then **Max** / **Auto**.
 
