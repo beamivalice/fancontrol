@@ -3,8 +3,7 @@ import Foundation
 /// Observed fan state, shared by the menubar, `fanctl`, `/status` and MCP.
 /// Never a command: nothing in this stack can put a fan into `.off`.
 public enum FanState: String, Codable, Sendable {
-    /// Nothing spinning under Auto. A Max hold is `.max` even at 0 rpm — OFF
-    /// used to outrank it and made the Max click look like a no-op.
+    /// Nothing spinning under Auto.
     case off
     case max
     case auto
@@ -13,8 +12,10 @@ public enum FanState: String, Codable, Sendable {
 }
 
 public enum FanHealth {
-    /// Stopped fans read 0, not the ~1350 rpm idle floor, so near-zero means stopped.
+    /// Stopped fans read 0, not the idle floor, so near-zero means stopped.
     public static let stoppedRPM: Float = 100
+    /// Firmware floor used to kick a parked motor when `F%dMn` reads unusable.
+    public static let idleFloorRPM: Float = 1350
 
     public static func allStopped(_ fans: [FanInfo]) -> Bool {
         !fans.isEmpty && fans.allSatisfy { $0.actualRPM < stoppedRPM }
@@ -30,7 +31,14 @@ public enum FanHealth {
         }
     }
 
-    /// This fan's RPM over *its* F%dMx. Fan 1 at 5350 is 100%; the other at 5777 is 100%.
+    /// Max to command for a fan: live `F%dMx`, or the last good value when the
+    /// firmware reads 0 for a parked fan. A 0 result means "never observed", and
+    /// the caller must refuse rather than kick toward zero.
+    public static func resolveMax(live: Float, lastGood: Float) -> Float {
+        live > 0 ? live : lastGood
+    }
+
+    /// This fan's RPM over *its own* `F%dMx`.
     public static func percent(of f: FanInfo) -> Int {
         guard f.maxRPM > 0 else { return 0 }
         return Swift.max(0, Swift.min(100, Int((f.actualRPM / f.maxRPM * 100).rounded())))

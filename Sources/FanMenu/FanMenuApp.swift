@@ -176,7 +176,7 @@ final class FanModel: ObservableObject {
     @Published var helperVersion: Int? = nil
     var onUpdate: (() -> Void)?
     /// Must match fand `daemonAPIVersion`. Missing/old helpers get replaced.
-    static let requiredHelperVersion = 6
+    static let requiredHelperVersion = 7
     /// While a Max/Auto request is in flight, the 2s poll must not overwrite the icon.
     private enum Pending { case none, max, auto }
     private var pending: Pending = .none
@@ -307,9 +307,7 @@ final class FanModel: ObservableObject {
         manual = true
         updateTitle()
         onUpdate?()
-        if await api("POST", "/max", ["ttl_seconds": 900]) == nil {
-            _ = await api("POST", "/boost", ["ttl_seconds": 900])
-        }
+        _ = await api("POST", "/max", ["ttl_seconds": 900])
         pending = .none
         await refresh()
     }

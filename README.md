@@ -10,6 +10,7 @@ Menubar app, CLI, HTTP API, and MCP server for Apple Silicon Macs (M1–M5). **A
 - Failsafe: live SoC/package sensors (`TC*` / `Tp*`) at 102 °C → Auto. `Tf*` trip-point keys are ignored.
 - API listens on `127.0.0.1:8765` only.
 - Process exit / SIGTERM / SIGINT → Auto.
+- One writer queue owns every SMC write; reads use a second SMC view, so a busy write can never delay a failsafe check.
 
 ## States
 

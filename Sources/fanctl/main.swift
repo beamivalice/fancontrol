@@ -61,15 +61,16 @@ case "sensors":
             for t in fc.temperatures().prefix(40) { print(String(format: "%@ %.1f", t.key, t.celsius)) }
         } catch { print("SMC error: \(error)") }
     }
-case "max", "boost":
-    // usage: fanctl max [--ttl seconds]  (boost = alias)
+case "max":
+    // usage: fanctl max [--ttl seconds]
     let ttl = ttlFromArgs(args)
     if let (c, o) = http("POST", "/max", ["ttl_seconds": ttl]), c == 200 { pretty(o) }
     else {
         do {
             let fc = try FanControl()
-            try fc.setAllMax()
-            print("all fans -> MAX (direct, no TTL safety — prefer fand)")
+            let confirmed = try fc.setAllMax()
+            print(confirmed ? "all fans -> MAX (direct, no TTL safety — prefer fand)"
+                             : "MAX written but not confirmed at target (direct, no TTL safety — prefer fand)")
             directStatus()
         } catch { print("direct write failed (\(error)). Tip: sudo fanctl max, or start fand."); exit(1) }
     }
@@ -88,7 +89,6 @@ default:
       status    fans + top temps (via daemon, else direct)
       sensors   all temp sensors
       max       all fans to MAX [--ttl s] (default 15 min via daemon, then auto)
-      boost     alias for max
       auto      back to macOS control (the default)
     Only Max and Auto exist — no low/custom speed is expressible.
     """)

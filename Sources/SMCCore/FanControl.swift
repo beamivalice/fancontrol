@@ -42,18 +42,31 @@ public struct HardwareConfig: Sendable {
 
 /// Fan control. The only manual state is every fan at its hardware-reported
 /// maximum (`F%dMx`); there is deliberately no API for a low or custom RPM.
+///
+/// Thread shape: reads touch only immutable state (or `cacheLock`), so the
+/// thermal failsafe can never queue behind a fan write. Writes are one
+/// transaction under `writeLock` — kick, target and mode must not interleave
+/// with a second writer, which is what strands `mode=1` on a stale target.
 public final class FanControl: @unchecked Sendable {
     public let conn: SMCConnection
     public let hw: HardwareConfig
+    public let fanCount: Int
+    /// Longest a single write transaction may hold `writeLock`. Kept under the
+    /// menubar's 15 s request timeout so a slow Max cannot outlive its client.
+    public let writeBudget: TimeInterval
 
-    public init(connection: SMCConnection? = nil) throws {
-        self.conn = try connection ?? SMCConnection()
-        self.hw = HardwareConfig.detect(connection: conn)
-    }
+    private let writeLock = NSLock()
+    private let cacheLock = NSLock()
+    private var lastKnownMax: [Int: Float] = [:]
+    private var dieKeysCache: [String]?
 
-    public var fanCount: Int {
-        guard let (b, _) = try? conn.readKey(FanKey.count) else { return 0 }
-        return Int(SMCFormat.uint8(from: b))
+    public init(connection: SMCConnection? = nil, writeBudget: TimeInterval = 8) throws {
+        let opened = try connection ?? SMCConnection()
+        self.conn = opened
+        self.hw = HardwareConfig.detect(connection: opened)
+        self.writeBudget = writeBudget
+        if let (b, _) = try? opened.readKey(FanKey.count) { self.fanCount = Int(SMCFormat.uint8(from: b)) }
+        else { self.fanCount = 0 }
     }
 
     public func readFan(_ i: Int) -> FanInfo? {
@@ -75,21 +88,29 @@ public final class FanControl: @unchecked Sendable {
 
     public func allFans() -> [FanInfo] { (0..<fanCount).compactMap(readFan) }
 
-    /// One fan to its hardware maximum: manual mode, then max target.
-    /// Last good F%dMx, in case a parked fan momentarily reports max as 0.
-    private var lastKnownMax: [Int: Float] = [:]
+    // MARK: - Write transactions
 
+    /// One fan to its hardware maximum: manual mode, then max target.
     public func setMax(fan: Int) throws {
+        writeLock.lock(); defer { writeLock.unlock() }
         guard let info = readFan(fan) else { throw SMCError.firmware(.notFound) }
         let rpm = resolvedMax(for: fan, from: info)
         guard rpm > 0 else { throw SMCError.firmware(.notFound) }
-        try kickIfParked(fan: fan, info: info)
-        try enableManual(fan: fan)
+        let end = Date().addingTimeInterval(writeBudget)
+        try kickIfParked(fan: fan, info: info, deadline: end)
+        try enableManual(fan: fan, deadline: end)
         try writeTarget(fan: fan, rpm: rpm)
     }
 
-    public func setAllMax() throws {
+    /// All fans to hardware maximum. Returns true only when every fan is
+    /// confirmed manual at target; false means the monitor will keep
+    /// re-asserting, not that the write failed.
+    @discardableResult
+    public func setAllMax() throws -> Bool {
+        writeLock.lock(); defer { writeLock.unlock() }
+        let end = Date().addingTimeInterval(writeBudget)
         let n = fanCount
+        guard n > 0 else { return false }
         var targets: [Int: Float] = [:]
         for f in 0..<n {
             guard let info = readFan(f) else { throw SMCError.firmware(.notFound) }
@@ -99,52 +120,58 @@ public final class FanControl: @unchecked Sendable {
         }
         // Firmware accepts F%dTg=max while parked at 0 rpm and never starts
         // the motor. Kick at the min floor first, then climb to max.
-        try kickParkedFans()
+        try kickParkedFans(until: min(end, Date().addingTimeInterval(2.5)))
         var lastError: Error?
-        for _ in 0..<5 {
+        while Date() < end {
             do {
                 for f in 0..<n { try writeTarget(fan: f, rpm: targets[f]!) }
-                for f in 0..<n { try enableManual(fan: f) }
+                let unlockBy = min(end, Date().addingTimeInterval(1.5))
+                for f in 0..<n { try enableManual(fan: f, deadline: unlockBy) }
                 Thread.sleep(forTimeInterval: 0.1)
                 let fans = allFans()
                 if fans.count == n, fans.allSatisfy({ f in
                     guard let want = targets[f.index], want > 0 else { return false }
                     return f.mode == 1 && f.targetRPM >= want * 0.95
                 }) {
-                    return
+                    return true
                 }
             } catch {
                 lastError = error
             }
+            if Date().addingTimeInterval(0.25) >= end { break }
             Thread.sleep(forTimeInterval: 0.15)
         }
         if let lastError { throw lastError }
+        return false
     }
 
-    /// Parked fans ignore a jump to max. Write the firmware floor first.
-    private func kickParkedFans() throws {
+    /// Parked fans ignore a jump to max; start the motor at the firmware floor.
+    /// Returns as soon as anything turns, or when `until` passes.
+    private func kickParkedFans(until: Date) throws {
         let fans = allFans()
         guard fans.contains(where: { $0.actualRPM < FanHealth.stoppedRPM }) else { return }
         for f in fans {
-            try kickIfParked(fan: f.index, info: f)
+            try kickIfParked(fan: f.index, info: f, deadline: until)
         }
-        let deadline = Date().addingTimeInterval(2.5)
-        while Date() < deadline {
+        while Date() < until {
             if allFans().contains(where: { $0.actualRPM >= FanHealth.stoppedRPM }) { return }
             Thread.sleep(forTimeInterval: 0.15)
         }
     }
 
-    private func kickIfParked(fan: Int, info: FanInfo) throws {
+    private func kickIfParked(fan: Int, info: FanInfo, deadline: Date) throws {
         guard info.actualRPM < FanHealth.stoppedRPM else { return }
-        let kick = info.minRPM > FanHealth.stoppedRPM ? info.minRPM : 1350
-        try enableManual(fan: fan)
+        let kick = info.minRPM > FanHealth.stoppedRPM ? info.minRPM : FanHealth.idleFloorRPM
+        try enableManual(fan: fan, deadline: deadline)
         try writeTarget(fan: fan, rpm: kick)
-        try enableManual(fan: fan)
+        try enableManual(fan: fan, deadline: deadline)
     }
 
+    /// A parked fan can momentarily report `F%dMx` as 0; fall back to the last
+    /// good maximum so a kick is never aimed at 0 rpm.
     private func resolvedMax(for fan: Int, from info: FanInfo) -> Float {
-        let rpm = info.maxRPM > 0 ? info.maxRPM : (lastKnownMax[fan] ?? 0)
+        cacheLock.lock(); defer { cacheLock.unlock() }
+        let rpm = FanHealth.resolveMax(live: info.maxRPM, lastGood: lastKnownMax[fan] ?? 0)
         if rpm > 0 { lastKnownMax[fan] = rpm }
         return rpm
     }
@@ -154,14 +181,17 @@ public final class FanControl: @unchecked Sendable {
     }
 
     public func setAllAuto() throws {
+        writeLock.lock(); defer { writeLock.unlock() }
         for f in 0..<fanCount { try setAuto(fan: f) }
         try releaseUnlockIfNeeded()
     }
 
     // MARK: - Writes
 
-    /// M1/M2/M5 accept a direct write; M3/M4 need an `Ftst` unlock and retry.
-    private func enableManual(fan: Int) throws {
+    /// M1/M2/M5 accept a direct write; M3/M4 need an `Ftst` unlock and retry
+    /// until `deadline`. The budget is shared by the whole transaction so two
+    /// fans can't cost twice the wait a client is already holding.
+    private func enableManual(fan: Int, deadline: Date) throws {
         let modeKey = FanKey.key(hw.modeKeyFormat, fan: fan)
         do {
             try conn.writeKey(modeKey, bytes: [1])
@@ -171,14 +201,11 @@ public final class FanControl: @unchecked Sendable {
         }
         try conn.writeKey(FanKey.forceTest, bytes: [1])
         Thread.sleep(forTimeInterval: 0.5)
-        let deadline = Date().addingTimeInterval(10)
-        while true {
+        while Date() < deadline {
             do { try conn.writeKey(modeKey, bytes: [1]); return }
-            catch {
-                if Date() >= deadline { throw SMCError.timeout }
-                Thread.sleep(forTimeInterval: 0.1)
-            }
+            catch { Thread.sleep(forTimeInterval: 0.1) }
         }
+        throw SMCError.timeout
     }
 
     private func writeTarget(fan: Int, rpm: Float) throws {
@@ -197,21 +224,19 @@ public final class FanControl: @unchecked Sendable {
 
     // MARK: Sensors
 
-    /// Cached SoC/package keys. `Tf*` are 99 °C trip points rather than live die
-    /// temps, so they must never reach the failsafe.
-    private var dieKeys: [String]?
+    /// SoC/package keys. `Tf*` are 99 °C trip points rather than live die temps,
+    /// so they must never reach the failsafe. Enumerating the key set is
+    /// expensive, so it is cached once behind `cacheLock`.
+    private func dieKeys() -> [String] {
+        cacheLock.lock(); defer { cacheLock.unlock() }
+        if let cached = dieKeysCache { return cached }
+        let keys = conn.enumerateKeys().filter { $0.hasPrefix("TC") || $0.hasPrefix("Tp") }
+        dieKeysCache = keys
+        return keys
+    }
 
     public func dieTemperatures() -> [(key: String, celsius: Float)] {
-        let keys: [String]
-        if let cached = dieKeys {
-            keys = cached
-        } else {
-            keys = conn.enumerateKeys().filter { k in
-                (k.hasPrefix("TC") || k.hasPrefix("Tp")) && !k.hasPrefix("Tf")
-            }
-            dieKeys = keys
-        }
-        return decodeTemps(keys)
+        decodeTemps(dieKeys())
     }
 
     /// All plausible T* keys (for `fanctl sensors`). Includes non-die probes.

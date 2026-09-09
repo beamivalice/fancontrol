@@ -2,8 +2,8 @@ import XCTest
 @testable import SMCCore
 
 final class FanStateTests: XCTestCase {
-    private func fan(_ i: Int, rpm: Float, mode: Int = 0, max: Float = 5777) -> FanInfo {
-        FanInfo(index: i, actualRPM: rpm, targetRPM: rpm, minRPM: 1350, maxRPM: max, mode: mode)
+    private func fan(_ i: Int, rpm: Float, mode: Int = 0, max: Float = 5777, target: Float? = nil) -> FanInfo {
+        FanInfo(index: i, actualRPM: rpm, targetRPM: target ?? rpm, minRPM: 1350, maxRPM: max, mode: mode)
     }
 
     func testNoDataIsUnknownNotOff() {
@@ -47,14 +47,20 @@ final class FanStateTests: XCTestCase {
     }
 
     func testNeedsMaxReassertWhenParkedOrDropped() {
-        let parked = [fan(0, rpm: 0, mode: 0), fan(1, rpm: 0, mode: 0)]
-        XCTAssertTrue(FanHealth.needsMaxReassert(parked))
+        XCTAssertTrue(FanHealth.needsMaxReassert([fan(0, rpm: 0, mode: 0), fan(1, rpm: 0, mode: 0)]))
+        XCTAssertTrue(FanHealth.needsMaxReassert([fan(0, rpm: 5343, mode: 0, max: 5349)]))
+        XCTAssertFalse(FanHealth.needsMaxReassert([fan(0, rpm: 5300, mode: 1, max: 5349, target: 5349)]))
+        XCTAssertFalse(FanHealth.needsMaxReassert([]))
+        // Manual, but firmware trimmed the target below 95% of F%dMx.
+        XCTAssertTrue(FanHealth.needsMaxReassert([fan(0, rpm: 5300, mode: 1, max: 5349, target: 4000)]))
+    }
 
-        let modeDropped = [fan(0, rpm: 5343, mode: 0, max: 5349)]
-        XCTAssertTrue(FanHealth.needsMaxReassert(modeDropped))
-
-        let holding = [FanInfo(index: 0, actualRPM: 5300, targetRPM: 5349, minRPM: 1350, maxRPM: 5349, mode: 1)]
-        XCTAssertFalse(FanHealth.needsMaxReassert(holding))
+    /// The hazard a parked fan creates: a Max aimed at 0 rpm.
+    func testMaxFallbackForParkedFan() {
+        XCTAssertEqual(FanHealth.resolveMax(live: 5349, lastGood: 0), 5349)
+        XCTAssertEqual(FanHealth.resolveMax(live: 0, lastGood: 5349), 5349)
+        XCTAssertEqual(FanHealth.resolveMax(live: 0, lastGood: 0), 0)
+        XCTAssertEqual(FanHealth.resolveMax(live: 1350, lastGood: 5349), 1350)
     }
 
     /// Each fan's 100% is its own F%dMx, not the other fan's ceiling.
