@@ -3,7 +3,8 @@ import Foundation
 /// Observed fan state, shared by the menubar, `fanctl`, `/status` and MCP.
 /// Never a command: nothing in this stack can put a fan into `.off`.
 public enum FanState: String, Codable, Sendable {
-    /// Nothing spinning. Idle-normal, but a fault while holding Max — so it outranks `.max`.
+    /// Nothing spinning under Auto. A Max hold is `.max` even at 0 rpm — OFF
+    /// used to outrank it and made the Max click look like a no-op.
     case off
     case max
     case auto
@@ -39,7 +40,8 @@ public enum FanHealth {
     /// optimistic flag while a request is in flight.
     public static func state(fans: [FanInfo], manual: Bool) -> FanState {
         guard !fans.isEmpty else { return .unknown }
+        if manual { return .max }
         if allStopped(fans) { return .off }
-        return manual ? .max : .auto
+        return .auto
     }
 }

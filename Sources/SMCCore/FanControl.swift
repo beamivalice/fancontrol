@@ -83,6 +83,7 @@ public final class FanControl: @unchecked Sendable {
         guard let info = readFan(fan) else { throw SMCError.firmware(.notFound) }
         let rpm = resolvedMax(for: fan, from: info)
         guard rpm > 0 else { throw SMCError.firmware(.notFound) }
+        try kickIfParked(fan: fan, info: info)
         try enableManual(fan: fan)
         try writeTarget(fan: fan, rpm: rpm)
     }
@@ -96,11 +97,14 @@ public final class FanControl: @unchecked Sendable {
             guard rpm > 0 else { throw SMCError.firmware(.notFound) }
             targets[f] = rpm
         }
+        // Firmware accepts F%dTg=max while parked at 0 rpm and never starts
+        // the motor. Kick at the min floor first, then climb to max.
+        try kickParkedFans()
         var lastError: Error?
         for _ in 0..<5 {
             do {
-                for f in 0..<n { try enableManual(fan: f) }
                 for f in 0..<n { try writeTarget(fan: f, rpm: targets[f]!) }
+                for f in 0..<n { try enableManual(fan: f) }
                 Thread.sleep(forTimeInterval: 0.1)
                 let fans = allFans()
                 if fans.count == n, fans.allSatisfy({ f in
@@ -115,6 +119,28 @@ public final class FanControl: @unchecked Sendable {
             Thread.sleep(forTimeInterval: 0.15)
         }
         if let lastError { throw lastError }
+    }
+
+    /// Parked fans ignore a jump to max. Write the firmware floor first.
+    private func kickParkedFans() throws {
+        let fans = allFans()
+        guard fans.contains(where: { $0.actualRPM < FanHealth.stoppedRPM }) else { return }
+        for f in fans {
+            try kickIfParked(fan: f.index, info: f)
+        }
+        let deadline = Date().addingTimeInterval(2.5)
+        while Date() < deadline {
+            if allFans().contains(where: { $0.actualRPM >= FanHealth.stoppedRPM }) { return }
+            Thread.sleep(forTimeInterval: 0.15)
+        }
+    }
+
+    private func kickIfParked(fan: Int, info: FanInfo) throws {
+        guard info.actualRPM < FanHealth.stoppedRPM else { return }
+        let kick = info.minRPM > FanHealth.stoppedRPM ? info.minRPM : 1350
+        try enableManual(fan: fan)
+        try writeTarget(fan: fan, rpm: kick)
+        try enableManual(fan: fan)
     }
 
     private func resolvedMax(for fan: Int, from info: FanInfo) -> Float {

@@ -11,10 +11,10 @@ final class FanStateTests: XCTestCase {
         XCTAssertEqual(FanHealth.state(fans: [], manual: true), .unknown)
     }
 
-    /// A Max that spun nothing up must not present as success.
-    func testStoppedFansAreOffEvenWhileHoldingMax() {
+    /// Holding Max stays Max even at 0 rpm, so the click is not a no-op.
+    func testHoldingMaxIsMaxEvenIfStopped() {
         let stopped = [fan(0, rpm: 0, mode: 1), fan(1, rpm: 0, mode: 1)]
-        XCTAssertEqual(FanHealth.state(fans: stopped, manual: true), .off)
+        XCTAssertEqual(FanHealth.state(fans: stopped, manual: true), .max)
     }
 
     func testIdleStoppedFansUnderAutoControl() {

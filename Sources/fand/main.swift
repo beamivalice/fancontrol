@@ -16,7 +16,7 @@ let failsafeTemp: Float = 102
 let defaultTTL: TimeInterval = 900
 let maxTTL: TimeInterval = 7200
 /// Bump when helper behavior changes so the app replaces a stale LaunchDaemon.
-let daemonAPIVersion = 5
+let daemonAPIVersion = 6
 
 final class DaemonState: @unchecked Sendable {
     let fc: FanControl

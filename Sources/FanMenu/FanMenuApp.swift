@@ -65,7 +65,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         glyph.needsDisplay = true
         switch model.state {
         case .off: item.button?.toolTip = "No fan is spinning — click for detail"
-        case .max: item.button?.toolTip = "Fans at MAX — click for RPM"
+        case .max:
+            item.button?.toolTip = FanHealth.allStopped(model.fans)
+                ? "MAX commanded — fans not spinning yet — click for detail"
+                : "Fans at MAX — click for RPM"
         case .auto: item.button?.toolTip = "Auto — click for RPM"
         case .unknown: item.button?.toolTip = "No fan data — click for detail"
         }
@@ -173,7 +176,7 @@ final class FanModel: ObservableObject {
     @Published var helperVersion: Int? = nil
     var onUpdate: (() -> Void)?
     /// Must match fand `daemonAPIVersion`. Missing/old helpers get replaced.
-    static let requiredHelperVersion = 5
+    static let requiredHelperVersion = 6
     /// While a Max/Auto request is in flight, the 2s poll must not overwrite the icon.
     private enum Pending { case none, max, auto }
     private var pending: Pending = .none
@@ -264,8 +267,7 @@ final class FanModel: ObservableObject {
         }
     }
 
-    /// Observed, never commanded. OFF outranks MAX so a Max that spun nothing up
-    /// cannot present as success; UNKNOWN stays separate from a reading of zero.
+    /// Observed. A Max hold is MAX even at 0 rpm; OFF is Auto idle only.
     var state: FanState { FanHealth.state(fans: fans, manual: manual) }
 
     var headerTitle: String {
@@ -395,7 +397,7 @@ struct FanPopover: View {
                 Text("Auto in \(Int(model.ttl / 60))m").font(.caption).foregroundStyle(.secondary)
             }
 
-            if model.state == .off {
+            if FanHealth.allStopped(model.fans) {
                 // Red = we hold Max and nothing spun; amber = macOS idling them, which is normal.
                 Text(model.manual ? "MAX commanded — no fan is spinning" : "Fans stopped (macOS is idling them)")
                     .font(.caption)
