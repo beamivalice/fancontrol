@@ -46,6 +46,17 @@ final class FanStateTests: XCTestCase {
                        ["auto", "max", "off", "unknown"])
     }
 
+    func testNeedsMaxReassertWhenParkedOrDropped() {
+        let parked = [fan(0, rpm: 0, mode: 0), fan(1, rpm: 0, mode: 0)]
+        XCTAssertTrue(FanHealth.needsMaxReassert(parked))
+
+        let modeDropped = [fan(0, rpm: 5343, mode: 0, max: 5349)]
+        XCTAssertTrue(FanHealth.needsMaxReassert(modeDropped))
+
+        let holding = [FanInfo(index: 0, actualRPM: 5300, targetRPM: 5349, minRPM: 1350, maxRPM: 5349, mode: 1)]
+        XCTAssertFalse(FanHealth.needsMaxReassert(holding))
+    }
+
     /// Percent is over the machine's highest max, so the floor reads ~23%.
     func testPercentUsesMachineCeilingNotPerFanMax() {
         let low = fan(0, rpm: 1350, max: 5349)

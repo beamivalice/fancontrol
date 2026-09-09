@@ -16,7 +16,7 @@ let failsafeTemp: Float = 102
 let defaultTTL: TimeInterval = 900
 let maxTTL: TimeInterval = 7200
 /// Bump when helper behavior changes so the app replaces a stale LaunchDaemon.
-let daemonAPIVersion = 4
+let daemonAPIVersion = 5
 
 final class DaemonState: @unchecked Sendable {
     let fc: FanControl
@@ -210,7 +210,9 @@ func handleRequest(_ s: DaemonState, method: String, path: String, body: Data) -
         do {
             try s.fc.setAllMax()
             s.lock.synchronized { s.expiresAt = Date().addingTimeInterval(ttl); s.pendingAuto = false; s.lastRequest = "max" }
-            let (spunUp, waited, spinCheck) = awaitSpinUp(s, baseline: baseline)
+            // Short wait only — a 10s hold from 0 rpm trips the menubar timeout
+            // and looks like Max did nothing. The 2s timer keeps re-asserting.
+            let (spunUp, waited, spinCheck) = awaitSpinUp(s, baseline: baseline, waitSeconds: 2)
             var payload = statusPayload(s)
             payload["spunUp"] = spunUp
             payload["spinWaitSeconds"] = waited
@@ -233,9 +235,16 @@ func startExpiryTimer(_ s: DaemonState) {
     t.schedule(deadline: .now() + .seconds(2), repeating: .seconds(2), leeway: .milliseconds(200))
     t.setEventHandler {
         if s.shouldRevert() { revertAllToAuto(s) }
-        if s.manualSnapshot(), let hottest = hottestDie(s.fc), hottest >= failsafeTemp {
+        guard s.manualSnapshot() else { return }
+        if let hottest = hottestDie(s.fc), hottest >= failsafeTemp {
             print("fand: FAILSAFE \(hottest)C -> auto")
             revertAllToAuto(s)
+            return
+        }
+        let fans = s.fc.allFans()
+        if FanHealth.needsMaxReassert(fans) {
+            print("fand: re-asserting Max (idle or firmware dropped it)")
+            try? s.fc.setAllMax()
         }
     }
     t.resume()

@@ -173,7 +173,7 @@ final class FanModel: ObservableObject {
     @Published var helperVersion: Int? = nil
     var onUpdate: (() -> Void)?
     /// Must match fand `daemonAPIVersion`. Missing/old helpers get replaced.
-    static let requiredHelperVersion = 4
+    static let requiredHelperVersion = 5
     /// While a Max/Auto request is in flight, the 2s poll must not overwrite the icon.
     private enum Pending { case none, max, auto }
     private var pending: Pending = .none
@@ -226,15 +226,17 @@ final class FanModel: ObservableObject {
                            maxRPM: Self.number(d["maxRPM"]) ?? 0,
                            mode: Self.number(d["mode"]).map(Int.init) ?? -1)
         }
+        var daemonManual = false
         if let c = s["control"] as? [String: Any] {
             ttl = Self.number(c["ttlRemaining"]).map { TimeInterval($0) } ?? 0
+            daemonManual = (c["manual"] as? Bool) ?? (Self.number(c["manual"]).map { $0 != 0 } ?? false)
         }
         helperVersion = Self.number(s["version"]).map { Int($0) }
         let hardwareManual = fans.contains { $0.mode == 1 }
         switch pending {
         case .max: manual = true
         case .auto: manual = false; ttl = 0
-        case .none: manual = hardwareManual
+        case .none: manual = daemonManual || hardwareManual
         }
         packageC = Self.packageTemp(from: s["topTemps"] as? [[String: Any]] ?? [])
     }
@@ -254,6 +256,15 @@ final class FanModel: ObservableObject {
 
     func updateTitle() {
         topLine = "FAN"
+        // In-flight Max must paint MAX even if macOS currently has the fans at 0.
+        // FanHealth.off otherwise outranks and the click looks like a no-op.
+        switch pending {
+        case .max:
+            bottomLine = "MAX"
+            return
+        case .auto, .none:
+            break
+        }
         switch state {
         case .off: bottomLine = "OFF"
         case .max: bottomLine = "MAX"
@@ -267,6 +278,7 @@ final class FanModel: ObservableObject {
     var state: FanState { FanHealth.state(fans: fans, manual: manual) }
 
     var headerTitle: String {
+        if pending == .max { return "MAX" }
         switch state {
         case .off: return "OFF"
         case .max: return "MAX"
@@ -285,7 +297,7 @@ final class FanModel: ObservableObject {
     func api(_ method: String, _ path: String, _ body: [String: Any]? = nil) async -> [String: Any]? {
         var req = URLRequest(url: URL(string: "http://127.0.0.1:8765\(path)")!)
         req.httpMethod = method
-        req.timeoutInterval = 12
+        req.timeoutInterval = 15
         if let b = body {
             req.httpBody = try? JSONSerialization.data(withJSONObject: b)
             req.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -427,7 +439,7 @@ struct FanPopover: View {
 
             HStack(spacing: 8) {
                 Button("Auto") { Task { await model.auto() } }
-                    .disabled(!model.daemonUp || !model.manual)
+                    .disabled(!model.daemonUp || (!model.manual && model.state != .off))
                     .keyboardShortcut("a")
                 Button("Max") { Task { await model.max() } }
                     .disabled(!model.daemonUp || model.manual)

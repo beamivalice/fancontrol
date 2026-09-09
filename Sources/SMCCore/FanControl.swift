@@ -76,14 +76,51 @@ public final class FanControl: @unchecked Sendable {
     public func allFans() -> [FanInfo] { (0..<fanCount).compactMap(readFan) }
 
     /// One fan to its hardware maximum: manual mode, then max target.
+    /// Last good F%dMx, in case a parked fan momentarily reports max as 0.
+    private var lastKnownMax: [Int: Float] = [:]
+
     public func setMax(fan: Int) throws {
         guard let info = readFan(fan) else { throw SMCError.firmware(.notFound) }
+        let rpm = resolvedMax(for: fan, from: info)
+        guard rpm > 0 else { throw SMCError.firmware(.notFound) }
         try enableManual(fan: fan)
-        try writeTarget(fan: fan, rpm: info.maxRPM)
+        try writeTarget(fan: fan, rpm: rpm)
     }
 
     public func setAllMax() throws {
-        for f in 0..<fanCount { try setMax(fan: f) }
+        let n = fanCount
+        var targets: [Int: Float] = [:]
+        for f in 0..<n {
+            guard let info = readFan(f) else { throw SMCError.firmware(.notFound) }
+            let rpm = resolvedMax(for: f, from: info)
+            guard rpm > 0 else { throw SMCError.firmware(.notFound) }
+            targets[f] = rpm
+        }
+        var lastError: Error?
+        for _ in 0..<5 {
+            do {
+                for f in 0..<n { try enableManual(fan: f) }
+                for f in 0..<n { try writeTarget(fan: f, rpm: targets[f]!) }
+                Thread.sleep(forTimeInterval: 0.1)
+                let fans = allFans()
+                if fans.count == n, fans.allSatisfy({ f in
+                    guard let want = targets[f.index], want > 0 else { return false }
+                    return f.mode == 1 && f.targetRPM >= want * 0.95
+                }) {
+                    return
+                }
+            } catch {
+                lastError = error
+            }
+            Thread.sleep(forTimeInterval: 0.15)
+        }
+        if let lastError { throw lastError }
+    }
+
+    private func resolvedMax(for fan: Int, from info: FanInfo) -> Float {
+        let rpm = info.maxRPM > 0 ? info.maxRPM : (lastKnownMax[fan] ?? 0)
+        if rpm > 0 { lastKnownMax[fan] = rpm }
+        return rpm
     }
 
     public func setAuto(fan: Int) throws {

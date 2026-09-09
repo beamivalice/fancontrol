@@ -19,6 +19,16 @@ public enum FanHealth {
         !fans.isEmpty && fans.allSatisfy { $0.actualRPM < stoppedRPM }
     }
 
+    /// Firmware / thermalmonitord drop manual mode when they park the fans.
+    /// A Max hold must be written again until mode, target, and spin recover.
+    public static func needsMaxReassert(_ fans: [FanInfo]) -> Bool {
+        !fans.isEmpty && fans.contains { f in
+            f.mode != 1
+                || (f.maxRPM > 0 && f.targetRPM < f.maxRPM * 0.95)
+                || f.actualRPM < stoppedRPM
+        }
+    }
+
     /// `manual` is "we are holding Max": the daemon's TTL state, or the app's
     /// optimistic flag while a request is in flight.
     public static func state(fans: [FanInfo], manual: Bool) -> FanState {
