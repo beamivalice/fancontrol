@@ -29,6 +29,12 @@ public enum FanHealth {
         }
     }
 
+    /// This fan's RPM over *its* F%dMx. Fan 1 at 5350 is 100%; the other at 5777 is 100%.
+    public static func percent(of f: FanInfo) -> Int {
+        guard f.maxRPM > 0 else { return 0 }
+        return Swift.max(0, Swift.min(100, Int((f.actualRPM / f.maxRPM * 100).rounded())))
+    }
+
     /// `manual` is "we are holding Max": the daemon's TTL state, or the app's
     /// optimistic flag while a request is in flight.
     public static func state(fans: [FanInfo], manual: Bool) -> FanState {

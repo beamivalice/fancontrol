@@ -1,6 +1,6 @@
 {
   "name": "fancontrol-mcp",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "MCP server for M5 MacBook fan control (bridges to fand on 127.0.0.1:8765)",
   "type": "module",
   "bin": { "fancontrol-mcp": "dist/index.js" },

@@ -57,10 +57,12 @@ final class FanStateTests: XCTestCase {
         XCTAssertFalse(FanHealth.needsMaxReassert(holding))
     }
 
-    /// Percent is over the machine's highest max, so the floor reads ~23%.
-    func testPercentUsesMachineCeilingNotPerFanMax() {
-        let low = fan(0, rpm: 1350, max: 5349)
-        let pct = Swift.max(0, Swift.min(100, Int((low.actualRPM / 5777 * 100).rounded())))
-        XCTAssertEqual(pct, 23)
+    /// Each fan's 100% is its own F%dMx, not the other fan's ceiling.
+    func testPercentUsesEachFansOwnMax() {
+        XCTAssertEqual(FanHealth.percent(of: fan(0, rpm: 5349, max: 5349)), 100)
+        XCTAssertEqual(FanHealth.percent(of: fan(1, rpm: 5777, max: 5777)), 100)
+        XCTAssertEqual(FanHealth.percent(of: fan(0, rpm: 1350, max: 5349)), 25)
+        XCTAssertEqual(FanHealth.percent(of: fan(1, rpm: 1350, max: 5777)), 23)
+        XCTAssertEqual(FanHealth.percent(of: fan(0, rpm: 0, max: 5349)), 0)
     }
 }

@@ -190,17 +190,8 @@ final class FanModel: ObservableObject {
         }
     }
 
-    /// RPM over the machine's highest max, so the idle floor reads ~23%, not 2%.
-    static func percent(of f: FanInfo, ceiling: Float) -> Int {
-        guard ceiling > 0 else { return 0 }
-        return Swift.max(0, Swift.min(100, Int((f.actualRPM / ceiling * 100).rounded())))
-    }
-
-    var ceilingRPM: Float { fans.map(\.maxRPM).max() ?? 0 }
-
     var glancePercent: Int {
-        guard let top = fans.max(by: { $0.actualRPM < $1.actualRPM }) else { return 0 }
-        return Self.percent(of: top, ceiling: ceilingRPM)
+        fans.map(FanHealth.percent(of:)).max() ?? 0
     }
 
     func refresh() async {
@@ -419,7 +410,7 @@ struct FanPopover: View {
                         Spacer()
                         Text(f.actualRPM < FanHealth.stoppedRPM
                              ? "stopped"
-                             : "\(Int(f.actualRPM)) rpm · \(FanModel.percent(of: f, ceiling: model.ceilingRPM))%")
+                             : "\(Int(f.actualRPM)) rpm · \(FanHealth.percent(of: f))%")
                             .font(.caption.monospacedDigit())
                     }
                     Text("min \(Int(f.minRPM)) · max \(Int(f.maxRPM))")

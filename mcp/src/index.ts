@@ -19,7 +19,7 @@ async function fand(method: string, path: string, body?: unknown) {
   return j;
 }
 
-const server = new McpServer({ name: "fancontrol", version: "0.4.0" });
+const server = new McpServer({ name: "fancontrol", version: "0.4.1" });
 
 server.tool("get_thermal_status", "Fans (RPM/mode/range), top die temps, control state + TTL.", {}, async () => {
   try {
