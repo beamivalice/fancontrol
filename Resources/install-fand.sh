@@ -1,6 +1,5 @@
 #!/bin/bash
-# Run as root (via the app's admin prompt). Installs fand as a LaunchDaemon
-# so it is already running whenever Fan Control opens — including after reboot.
+# Run as root from the app's admin prompt; installs/replaces the fand LaunchDaemon.
 set -euo pipefail
 BUNDLE="${1:?app bundle path}"
 FAND_SRC="$BUNDLE/Contents/MacOS/fand"

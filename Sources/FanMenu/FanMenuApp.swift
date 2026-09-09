@@ -4,7 +4,7 @@ import SwiftUI
 import SMCCore
 
 // AppKit status item — SwiftUI MenuBarExtra cannot draw a two-line iStat widget.
-// Bar: FAN / 12%   or   FAN / MAX. RPM only in the click popover.
+// Bar: FAN / OFF | MAX | 23% | —. RPM only in the click popover.
 
 @main
 enum FanMenuMain {
@@ -63,7 +63,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         glyph.top = model.topLine
         glyph.bottom = model.bottomLine
         glyph.needsDisplay = true
-        item.button?.toolTip = model.manual ? "Fans at MAX — click for RPM" : "Auto — click for RPM"
+        switch model.state {
+        case .off: item.button?.toolTip = "No fan is spinning — click for detail"
+        case .max: item.button?.toolTip = "Fans at MAX — click for RPM"
+        case .auto: item.button?.toolTip = "Auto — click for RPM"
+        case .unknown: item.button?.toolTip = "No fan data — click for detail"
+        }
     }
 
     @objc func toggle(_ sender: Any?) {
@@ -119,8 +124,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
-/// Draws into the live status-item button so text is retina and sits
-/// in the same optical box as iStat CPU/GPU/RAM.
+/// Draws into the status-item button so the text matches the iStat widgets.
 final class TwoLineStatusView: NSView {
     var top = "FAN"
     var bottom = "—"
@@ -163,13 +167,13 @@ final class FanModel: ObservableObject {
     @Published var packageC: Int? = nil
     @Published var daemonUp = false
     @Published var openAtLogin = (SMAppService.mainApp.status == .enabled)
-    /// App version from the bundle (CFBundleShortVersionString), shown in the popover title.
+    /// From Info.plist; drives the popover version badge.
     let appVersion = (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "0.0.0"
     /// fand's `daemonAPIVersion`, nil while the helper is unreachable.
     @Published var helperVersion: Int? = nil
     var onUpdate: (() -> Void)?
     /// Must match fand `daemonAPIVersion`. Missing/old helpers get replaced.
-    static let requiredHelperVersion = 3
+    static let requiredHelperVersion = 4
     /// While a Max/Auto request is in flight, the 2s poll must not overwrite the icon.
     private enum Pending { case none, max, auto }
     private var pending: Pending = .none
@@ -186,8 +190,7 @@ final class FanModel: ObservableObject {
         }
     }
 
-    /// Per-fan: this fan's RPM over the machine's highest max (5777 on this M5).
-    /// So the floor reads ~1350/5777 ≈ 23%, not “2% above min.”
+    /// RPM over the machine's highest max, so the idle floor reads ~23%, not 2%.
     static func percent(of f: FanInfo, ceiling: Float) -> Int {
         guard ceiling > 0 else { return 0 }
         return Swift.max(0, Swift.min(100, Int((f.actualRPM / ceiling * 100).rounded())))
@@ -251,9 +254,25 @@ final class FanModel: ObservableObject {
 
     func updateTitle() {
         topLine = "FAN"
-        if manual { bottomLine = "MAX" }
-        else if !fans.isEmpty { bottomLine = "\(glancePercent)%" }
-        else { bottomLine = "—" }
+        switch state {
+        case .off: bottomLine = "OFF"
+        case .max: bottomLine = "MAX"
+        case .auto: bottomLine = "\(glancePercent)%"
+        case .unknown: bottomLine = "—"
+        }
+    }
+
+    /// Observed, never commanded. OFF outranks MAX so a Max that spun nothing up
+    /// cannot present as success; UNKNOWN stays separate from a reading of zero.
+    var state: FanState { FanHealth.state(fans: fans, manual: manual) }
+
+    var headerTitle: String {
+        switch state {
+        case .off: return "OFF"
+        case .max: return "MAX"
+        case .auto: return "AUTO"
+        case .unknown: return "NO DATA"
+        }
     }
 
     func readDirect() async {
@@ -296,8 +315,7 @@ final class FanModel: ObservableObject {
         return v < Self.requiredHelperVersion
     }
 
-    /// Prompt once for admin and install/replace the LaunchDaemon helper.
-    /// After that launchd keeps it running at boot — the app does not sudo again.
+    /// One admin prompt to install/replace the LaunchDaemon; launchd owns it after that.
     func ensureHelper() async {
         guard let script = Bundle.main.url(forResource: "install-fand", withExtension: "sh")?.path else { return }
         let bundle = Bundle.main.bundlePath
@@ -351,7 +369,7 @@ struct FanPopover: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .firstTextBaseline, spacing: 5) {
-                Text(model.manual ? "MAX" : "AUTO")
+                Text(model.headerTitle)
                     .font(.system(size: 13, weight: .semibold))
                 Text("v\(model.appVersion)")
                     .font(.system(size: 10, weight: .regular))
@@ -374,12 +392,22 @@ struct FanPopover: View {
                 Text("Auto in \(Int(model.ttl / 60))m").font(.caption).foregroundStyle(.secondary)
             }
 
+            if model.state == .off {
+                // Red = we hold Max and nothing spun; amber = macOS idling them, which is normal.
+                Text(model.manual ? "MAX commanded — no fan is spinning" : "Fans stopped (macOS is idling them)")
+                    .font(.caption)
+                    .foregroundStyle(model.manual ? Color.red : Color.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
             ForEach(model.fans, id: \.index) { f in
                 VStack(alignment: .leading, spacing: 1) {
                     HStack {
                         Text("Fan \(f.index + 1)").font(.caption)
                         Spacer()
-                        Text("\(Int(f.actualRPM)) rpm · \(FanModel.percent(of: f, ceiling: model.ceilingRPM))%")
+                        Text(f.actualRPM < FanHealth.stoppedRPM
+                             ? "stopped"
+                             : "\(Int(f.actualRPM)) rpm · \(FanModel.percent(of: f, ceiling: model.ceilingRPM))%")
                             .font(.caption.monospacedDigit())
                     }
                     Text("min \(Int(f.minRPM)) · max \(Int(f.maxRPM))")
@@ -407,9 +435,6 @@ struct FanPopover: View {
                 Spacer()
                 Button("Quit") { NSApp.terminate(nil) }
                     .keyboardShortcut("q")
-                    // Deliberately the same default (.bordered) style as Auto/Max:
-                    // a borderless Quit read as disabled/inert next to two framed
-                    // buttons. Keep all three visually equal.
             }
         }
         .padding(12)

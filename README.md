@@ -11,6 +11,10 @@ Menubar app, CLI, HTTP API, and MCP server for Apple Silicon Macs (M1–M5). **A
 - API listens on `127.0.0.1:8765` only.
 - Process exit / SIGTERM / SIGINT → Auto.
 
+## States
+
+The menubar shows what the sensors report: **OFF** (nothing spinning), **MAX**, **23%** (auto), **—** (no data). OFF is display-only — no user, agent or endpoint can command it. `GET /status` returns the same value as `state`, and `fanctl status` prints it.
+
 This uses undocumented SMC keys. Firmware thermal protection still applies. Use at your own risk.
 
 ## Install

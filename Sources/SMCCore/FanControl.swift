@@ -40,12 +40,8 @@ public struct HardwareConfig: Sendable {
     }
 }
 
-/// High-level fan control — SAFE subset only.
-/// The ONLY manual state this class can produce is "all relevant fans at
-/// their hardware-reported maximum" (F%dMx). There is deliberately NO public
-/// API to set an arbitrary/low RPM: forcing low fans under load must not
-/// even be expressible. M5: direct `F0md=1` write (no Ftst key).
-/// M3/M4: Ftst=1 unlock + retry mode write. M1/M2: direct write.
+/// Fan control. The only manual state is every fan at its hardware-reported
+/// maximum (`F%dMx`); there is deliberately no API for a low or custom RPM.
 public final class FanControl: @unchecked Sendable {
     public let conn: SMCConnection
     public let hw: HardwareConfig
@@ -79,8 +75,7 @@ public final class FanControl: @unchecked Sendable {
 
     public func allFans() -> [FanInfo] { (0..<fanCount).compactMap(readFan) }
 
-    /// Set one fan to its hardware maximum. Atomic: manual mode + max target.
-    /// This is the ONLY manual write path. There is no low/custom RPM API.
+    /// One fan to its hardware maximum: manual mode, then max target.
     public func setMax(fan: Int) throws {
         guard let info = readFan(fan) else { throw SMCError.firmware(.notFound) }
         try enableManual(fan: fan)
@@ -100,10 +95,9 @@ public final class FanControl: @unchecked Sendable {
         try releaseUnlockIfNeeded()
     }
 
-    // MARK: - Raw writes (private: never expose low/custom RPM)
+    // MARK: - Writes
 
-    /// Enable manual mode. Tries direct write first (works on M1/M2/M5),
-    /// falls back to Ftst unlock (M3/M4).
+    /// M1/M2/M5 accept a direct write; M3/M4 need an `Ftst` unlock and retry.
     private func enableManual(fan: Int) throws {
         let modeKey = FanKey.key(hw.modeKeyFormat, fan: fan)
         do {
@@ -140,8 +134,8 @@ public final class FanControl: @unchecked Sendable {
 
     // MARK: Sensors
 
-    /// Cached once: SoC/package keys only. `Tf*` includes 99 °C trip-point
-    /// keys that are not live die temps and must not drive the failsafe.
+    /// Cached SoC/package keys. `Tf*` are 99 °C trip points rather than live die
+    /// temps, so they must never reach the failsafe.
     private var dieKeys: [String]?
 
     public func dieTemperatures() -> [(key: String, celsius: Float)] {

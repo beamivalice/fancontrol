@@ -1,9 +1,6 @@
 #!/usr/bin/env node
-// fancontrol-mcp: MCP (stdio) -> fand HTTP (127.0.0.1:8765).
-// SAFE SUBSET ONLY: get_thermal_status, max_fans, set_fan_auto.
-// There is deliberately NO tool for low/custom RPM — agents can only
-// request Max (TTL-guarded) or hand back to macOS Auto.
-// Safety (TTL, Max-only, 102C failsafe) is enforced by fand, not here.
+// MCP (stdio) bridge to fand on 127.0.0.1:8765. Exposes Max and Auto only;
+// TTL, the Max-only ceiling and the failsafe are enforced by fand, not here.
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
@@ -35,7 +32,7 @@ server.tool("get_thermal_status", "Fans (RPM/mode/range), top die temps, control
 
 server.tool(
   "max_fans",
-  "All fans to HARDWARE MAXIMUM for ttl_seconds (pre-cool before builds/inference). Auto-reverts to macOS control after TTL. Verifies each fan reached the RPM it was commanded to (reports before/after per fan) — a fan that was already fast is no longer mistaken for success. This is the ONLY speed change available; low/custom speeds are not expressible.",
+  "All fans to hardware maximum for ttl_seconds (pre-cool before builds/inference). Verifies each fan reached its commanded RPM and reports per-fan before/after. Auto-reverts to macOS control after TTL. Only Max and Auto exist — low/custom speeds are not expressible.",
   { ttl_seconds: z.number().int().min(60).max(7200).default(900).describe("Auto-revert to macOS control after this long (default 15 min, max 2 h)") },
   async ({ ttl_seconds }) => {
     const r: any = await fand("POST", "/max", { ttl_seconds });

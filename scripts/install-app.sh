@@ -1,12 +1,9 @@
 #!/bin/bash
 set -euo pipefail
 cd "$(dirname "$0")/.."
-# NOTE: repeated `--product` flags do NOT accumulate — SwiftPM builds only the
-# last one, so `--product FanMenu --product fand` silently shipped a stale
-# menubar binary. Build every product instead.
+# Build every product: repeated --product flags build only the last one.
 swift build -c release
-# The MCP server runs from mcp/dist — a stale dist silently ships an old tool
-# set (0.2 tools while src says 0.3). Build it as part of shipping the app.
+# mcp/dist is what the MCP server actually runs; a stale dist ships old tools.
 if command -v npm >/dev/null 2>&1; then
   [ -d mcp/node_modules ] || npm --prefix mcp install --no-audit --no-fund
   npm --prefix mcp run build

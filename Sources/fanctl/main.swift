@@ -31,8 +31,10 @@ func pretty(_ o: Any?) {
 func directStatus() {
     do {
         let fc = try FanControl()
+        let fans = fc.allFans()
         print("model \(SMCConnection.hardwareModel())  modeKey=\(fc.hw.modeKeyFormat) ftst=\(fc.hw.ftstAvailable)")
-        for f in fc.allFans() {
+        print("state \(FanHealth.state(fans: fans, manual: fans.contains { $0.mode == 1 }).rawValue)")
+        for f in fans {
             print("fan\(f.index): actual=\(Int(f.actualRPM)) target=\(Int(f.targetRPM)) range=[\(Int(f.minRPM))-\(Int(f.maxRPM))] mode=\(f.mode)")
         }
         for t in fc.temperatures(limit: 60).prefix(12) { print(String(format: "  %@ %.1f°C", t.key, t.celsius)) }

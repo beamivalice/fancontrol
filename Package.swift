@@ -21,5 +21,6 @@ let package = Package(
                 .linkedFramework("ServiceManagement"),
             ]
         ),
+        .testTarget(name: "SMCCoreTests", dependencies: ["SMCCore"]),
     ]
 )

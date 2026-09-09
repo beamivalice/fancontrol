@@ -1,9 +1,8 @@
 #!/bin/bash
-# One-time: install fand as a root LaunchDaemon so it starts at every boot.
-# After this you never sudo fand by hand again. Password is asked once here.
+# Installs fand as a root LaunchDaemon so it starts at every boot (asks once).
 set -euo pipefail
 cd "$(dirname "$0")/.."
-swift build -c release   # all products: repeated --product builds only the last one
+swift build -c release
 echo "Installing LaunchDaemon (needs your password once)…"
 # Stop a hand-started copy so launchd can bind :8765.
 sudo pkill -x fand 2>/dev/null || true
