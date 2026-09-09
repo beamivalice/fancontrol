@@ -70,7 +70,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if panel?.isVisible == true { closePanel(); return }
         guard let button = item.button, let buttonWindow = button.window else { return }
 
-        let size = NSSize(width: 220, height: 210)
+        let size = NSSize(width: 220, height: 236)
         let buttonRect = button.convert(button.bounds, to: nil)
         let screenRect = buttonWindow.convertToScreen(buttonRect)
         var origin = NSPoint(
@@ -163,6 +163,10 @@ final class FanModel: ObservableObject {
     @Published var packageC: Int? = nil
     @Published var daemonUp = false
     @Published var openAtLogin = (SMAppService.mainApp.status == .enabled)
+    /// App version from the bundle (CFBundleShortVersionString), shown in the popover title.
+    let appVersion = (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "0.0.0"
+    /// fand's `daemonAPIVersion`, nil while the helper is unreachable.
+    @Published var helperVersion: Int? = nil
     var onUpdate: (() -> Void)?
     /// Must match fand `daemonAPIVersion`. Missing/old helpers get replaced.
     static let requiredHelperVersion = 3
@@ -202,6 +206,7 @@ final class FanModel: ObservableObject {
             apply(status: s)
         } else {
             daemonUp = false
+            helperVersion = nil
             await readDirect()
         }
         updateTitle()
@@ -221,6 +226,7 @@ final class FanModel: ObservableObject {
         if let c = s["control"] as? [String: Any] {
             ttl = Self.number(c["ttlRemaining"]).map { TimeInterval($0) } ?? 0
         }
+        helperVersion = Self.number(s["version"]).map { Int($0) }
         let hardwareManual = fans.contains { $0.mode == 1 }
         switch pending {
         case .max: manual = true
@@ -344,18 +350,25 @@ struct FanPopover: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            HStack {
+            HStack(alignment: .firstTextBaseline, spacing: 5) {
                 Text(model.manual ? "MAX" : "AUTO")
                     .font(.system(size: 13, weight: .semibold))
+                Text("v\(model.appVersion)")
+                    .font(.system(size: 10, weight: .regular))
+                    .foregroundStyle(.tertiary)
                 Spacer()
                 if let c = model.packageC {
-                    Text("\(c)°").font(.system(size: 13, weight: .medium).monospacedDigit())
+                    Text("\(c)°C").font(.system(size: 13, weight: .medium).monospacedDigit())
                 }
             }
 
             if !model.daemonUp {
                 Text("Helper not running").font(.caption).foregroundStyle(.secondary)
                 Button("Install helper…") { Task { await model.ensureHelper() } }
+                    .font(.caption)
+            } else if let h = model.helperVersion, h < FanModel.requiredHelperVersion {
+                Text("Helper v\(h) is older than this app (needs v\(FanModel.requiredHelperVersion))").font(.caption).foregroundStyle(.orange)
+                Button("Update helper…") { Task { await model.ensureHelper() } }
                     .font(.caption)
             } else if model.manual, model.ttl > 0 {
                 Text("Auto in \(Int(model.ttl / 60))m").font(.caption).foregroundStyle(.secondary)
@@ -394,7 +407,10 @@ struct FanPopover: View {
                 Spacer()
                 Button("Quit") { NSApp.terminate(nil) }
                     .buttonStyle(.plain)
-                    .foregroundStyle(.secondary)
+                    // Never tint this secondary: the panel is a nonactivating
+                    // window, so dimmed text reads as "disabled" even though the
+                    // button always works. Keep it at full label strength.
+                    .foregroundStyle(.primary)
             }
         }
         .padding(12)

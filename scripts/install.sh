@@ -3,7 +3,7 @@
 # After this you never sudo fand by hand again. Password is asked once here.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-swift build -c release --product fand --product fanctl
+swift build -c release   # all products: repeated --product builds only the last one
 echo "Installing LaunchDaemon (needs your password once)…"
 # Stop a hand-started copy so launchd can bind :8765.
 sudo pkill -x fand 2>/dev/null || true
