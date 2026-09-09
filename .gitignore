@@ -1,0 +1,60 @@
+# SwiftPM
+.build/
+.swiftpm/
+Packages/
+Package.resolved
+
+# Xcode
+*.xcodeproj/
+*.xcworkspace/
+xcuserdata/
+DerivedData/
+*.pbxuser
+*.mode1v3
+*.mode2v3
+*.perspectivev3
+*.hmap
+*.ipa
+*.dSYM.zip
+*.dSYM/
+
+# App bundling
+*.app/
+Products/
+
+# MCP (Node/TypeScript)
+mcp/node_modules/
+mcp/dist/
+mcp/*.log
+node_modules/
+dist/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+
+# Logs & local env
+*.log
+/var/log/fand.log
+.env
+.env.local
+
+# Local signing / machine config
+Config/local.xcconfig
+*.mobileprovision
+*.p12
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.cursor/

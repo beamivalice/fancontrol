@@ -1,0 +1,10 @@
+{
+  "name": "fancontrol-mcp",
+  "version": "0.1.0",
+  "description": "MCP server for M5 MacBook fan control (bridges to fand on 127.0.0.1:8765)",
+  "type": "module",
+  "bin": { "fancontrol-mcp": "dist/index.js" },
+  "scripts": { "build": "tsc", "start": "node dist/index.js" },
+  "dependencies": { "@modelcontextprotocol/sdk": "^1.12.0", "zod": "^3.23.0" },
+  "devDependencies": { "typescript": "^5.6.0", "@types/node": "^22.0.0" }
+}
