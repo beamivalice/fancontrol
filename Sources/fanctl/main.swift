@@ -1,9 +1,9 @@
 import Foundation
 import SMCCore
 
-// fanctl: CLI for humans + scripts + agents.
-// Prefers the fand HTTP API (127.0.0.1:8765) when reachable; falls back to direct SMC.
-// Writes require root when going direct: run `sudo fanctl set ...`.
+// fanctl: CLI for humans + scripts + agents. SAFE SUBSET ONLY: Auto and Max.
+// Prefers the fand HTTP API (127.0.0.1:8765); falls back to direct SMC reads.
+// Direct Max writes require root: `sudo fanctl max`.
 
 let base = URL(string: "http://127.0.0.1:8765")!
 
@@ -18,7 +18,7 @@ func http(_ method: String, _ path: String, _ body: [String: Any]? = nil) -> (In
         let obj = data.flatMap { try? JSONSerialization.jsonObject(with: $0) }
         out = (code, obj); sem.signal()
     }.resume()
-    _ = sem.wait(timeout: .now() + 8)
+    _ = sem.wait(timeout: .now() + 30)
     return out
 }
 
@@ -39,6 +39,11 @@ func directStatus() {
     } catch { print("SMC error: \(error)") }
 }
 
+func ttlFromArgs(_ args: [String]) -> Double {
+    if let i = args.firstIndex(of: "--ttl"), i + 1 < args.count { return Double(args[i+1]) ?? 900 }
+    return 900
+}
+
 let args = CommandLine.arguments
 let cmd = args.count > 1 ? args[1] : "status"
 
@@ -54,51 +59,35 @@ case "sensors":
             for t in fc.temperatures().prefix(40) { print(String(format: "%@ %.1f", t.key, t.celsius)) }
         } catch { print("SMC error: \(error)") }
     }
-case "set":
-    // usage: fanctl set <rpm|percent%> [--fan N] [--ttl seconds]
-    guard args.count > 2 else { print("usage: fanctl set <rpm|80%> [--fan N] [--ttl seconds]"); exit(1) }
-    var body: [String: Any] = [:]
-    let v = args[2]
-    if v.hasSuffix("%") { body["percent"] = Double(v.dropLast()) ?? 70 }
-    else { body["rpm"] = Double(v) ?? 4500 }
-    if let i = args.firstIndex(of: "--fan"), i + 1 < args.count { body["fan"] = Int(args[i+1]) ?? 0 }
-    if let i = args.firstIndex(of: "--ttl"), i + 1 < args.count { body["ttl_seconds"] = Double(args[i+1]) ?? 900 }
-    if let (c, o) = http("POST", "/set", body), c == 200 { pretty(o) }
+case "max", "boost":
+    // usage: fanctl max [--ttl seconds]  (boost = alias)
+    let ttl = ttlFromArgs(args)
+    if let (c, o) = http("POST", "/max", ["ttl_seconds": ttl]), c == 200 { pretty(o) }
     else {
-        // direct (needs root)
         do {
             let fc = try FanControl()
-            let fan = body["fan"] as? Int ?? 0
-            var rpm: Float
-            if let p = body["percent"] as? Double, let info = fc.readFan(fan) {
-                rpm = info.minRPM + (info.maxRPM - info.minRPM) * Float(p) / 100
-            } else { rpm = Float(body["rpm"] as? Double ?? 4500) }
-            try fc.enableManual(fan: fan); try fc.setTarget(fan: fan, rpm: rpm)
-            print("fan\(fan) -> \(Int(rpm)) RPM (direct, no TTL safety — prefer fand)")
-        } catch { print("direct write failed (\(error)). Tip: sudo fanctl set … or run fand."); exit(1) }
+            try fc.setAllMax()
+            print("all fans -> MAX (direct, no TTL safety — prefer fand)")
+            directStatus()
+        } catch { print("direct write failed (\(error)). Tip: sudo fanctl max, or start fand."); exit(1) }
     }
-case "boost":
-    if let (c, o) = http("POST", "/boost", ["ttl_seconds": 600]), c == 200 { pretty(o) }
-    else { print("daemon unreachable; use: sudo fanctl set 100% --ttl 600") }
 case "auto":
-    var body: [String: Any] = [:]
-    if let i = args.firstIndex(of: "--fan"), i + 1 < args.count { body["fan"] = Int(args[i+1]) ?? 0 }
-    if let (c, o) = http("POST", "/auto", body), c == 200 { pretty(o) }
+    if let (c, o) = http("POST", "/auto", [:]), c == 200 { pretty(o) }
     else {
         do {
             let fc = try FanControl()
-            if let f = body["fan"] as? Int { try fc.setAuto(fan: f) }
-            else { for ff in fc.allFans() { try fc.setAuto(fan: ff.index) }; try fc.releaseUnlockIfNeeded() }
+            try fc.setAllAuto()
             print("auto restored (direct)")
         } catch { print("failed: \(error)"); exit(1) }
     }
 default:
     print("""
-    usage: fanctl <status|sensors|set|boost|auto>
-      status                  fans + top temps (via daemon, else direct)
-      sensors                 all temp sensors
-      set <rpm|80%> [--fan N] [--ttl s]   manual speed (default TTL 15 min via daemon)
-      boost                   all fans to max for 10 min
-      auto [--fan N]          back to macOS control
+    usage: fanctl <status|sensors|max|auto>
+      status    fans + top temps (via daemon, else direct)
+      sensors   all temp sensors
+      max       all fans to MAX [--ttl s] (default 15 min via daemon, then auto)
+      boost     alias for max
+      auto      back to macOS control (the default)
+    Only Max and Auto exist — no low/custom speed is expressible.
     """)
 }

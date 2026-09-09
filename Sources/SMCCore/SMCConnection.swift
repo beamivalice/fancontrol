@@ -70,10 +70,8 @@ public final class SMCConnection: @unchecked Sendable {
         param.key = try fourCharCode(from: key)
         param.data8 = SMCCommand.readKeyInfo.rawValue
         let output = try callSMC(input: param)
-        guard output.result == SMCResultCode.success.rawValue,
-              let _ = SMCResultCode(rawValue: output.result) else {
-            guard let code = SMCResultCode(rawValue: output.result) else { throw SMCError.firmware(.error) }
-            throw SMCError.firmware(code)
+        guard output.result == SMCResultCode.success.rawValue else {
+            throw SMCError.firmware(SMCResultCode(rawValue: output.result) ?? .error)
         }
         return (param, output)
     }

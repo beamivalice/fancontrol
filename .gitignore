@@ -21,7 +21,7 @@ DerivedData/
 # App bundling
 *.app/
 Products/
-
+Resources/AppIcon.iconset/
 # MCP (Node/TypeScript)
 mcp/node_modules/
 mcp/dist/

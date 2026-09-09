@@ -43,14 +43,48 @@ final class DaemonState: @unchecked Sendable {
     }
 }
 
-func json(_ obj: Any) -> Data { (try? JSONSerialization.data(withJSONObject: obj)) ?? Data("{}".utf8) }
+enum Runtime {
+    static var state: DaemonState?
+    static func halt(_ why: String) {
+        print("fand: \(why)")
+        if let s = state { revertAllToAuto(s) }
+        exit(0)
+    }
+}
+
+func jsonValue(_ obj: Any) -> Any {
+    switch obj {
+    case let f as Float: return f.isFinite ? Double(f) : NSNull()
+    case let d as Double: return d.isFinite ? d : NSNull()
+    case let a as [Any]: return a.map(jsonValue)
+    case let d as [String: Any]: return d.mapValues { jsonValue($0) }
+    default: return obj
+    }
+}
+
+func json(_ obj: Any) -> Data {
+    (try? JSONSerialization.data(withJSONObject: jsonValue(obj))) ?? Data("{}".utf8)
+}
+
+func jsonNumber(_ raw: Any?) -> Double? {
+    switch raw {
+    case let d as Double: return d
+    case let i as Int: return Double(i)
+    case let n as NSNumber: return n.doubleValue
+    default: return nil
+    }
+}
+
+func hottestDie(_ fc: FanControl) -> Float? {
+    fc.dieTemperatures().map(\.celsius).max()
+}
 
 func statusPayload(_ s: DaemonState) -> [String: Any] {
     let fans = s.fc.allFans().map { f -> [String: Any] in
-        ["index": f.index, "actualRPM": f.actualRPM, "targetRPM": f.targetRPM,
-         "minRPM": f.minRPM, "maxRPM": f.maxRPM, "mode": f.mode]
+        ["index": f.index, "actualRPM": Double(f.actualRPM), "targetRPM": Double(f.targetRPM),
+         "minRPM": Double(f.minRPM), "maxRPM": Double(f.maxRPM), "mode": f.mode]
     }
-    let temps = s.fc.temperatures(limit: 60).prefix(15).map { ["key": $0.key, "celsius": $0.celsius] }
+    let temps = s.fc.dieTemperatures().prefix(15).map { ["key": $0.key, "celsius": Double($0.celsius)] }
     return ["model": SMCConnection.hardwareModel(),
             "fans": fans,
             "topTemps": temps,
@@ -86,7 +120,7 @@ func handleRequest(_ s: DaemonState, method: String, path: String, body: Data) -
     if s.expiredSnapshot() { revertAllToAuto(s) }
     var failsafeHit: Float? = nil
     if s.manualSnapshot() {
-        if let hottest = s.fc.temperatures(limit: 60).map(\.celsius).max(), hottest >= failsafeTemp {
+        if let hottest = hottestDie(s.fc), hottest >= failsafeTemp {
             failsafeHit = hottest
             revertAllToAuto(s)
         }
@@ -108,13 +142,13 @@ func handleRequest(_ s: DaemonState, method: String, path: String, body: Data) -
         } catch {
             return (500, ["ok": false, "error": "\(error)"] as [String: Any])
         }
-        s.lock.synchronized { s.lastRequest = "auto" }
+        s.lock.synchronized { s.expiresAt = nil; s.lastRequest = "auto" }
         return (200, ["ok": true, "status": statusPayload(s)] as [String: Any])
     }
     // Max only. /set is intentionally gone: no custom/low RPM path exists.
     // /max is the canonical name; /boost kept as an alias.
     if method == "POST", path == "/max" || path == "/boost" {
-        let ttl = min(max((b["ttl_seconds"] as? Double) ?? defaultTTL, 60), maxTTL)
+        let ttl = min(max(jsonNumber(b["ttl_seconds"]) ?? defaultTTL, 60), maxTTL)
         do {
             try s.fc.setAllMax()
             s.lock.synchronized { s.expiresAt = Date().addingTimeInterval(ttl); s.lastRequest = "max" }
@@ -137,8 +171,7 @@ func handleRequest(_ s: DaemonState, method: String, path: String, body: Data) -
 func startExpiryTimer(_ s: DaemonState) {
     Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { _ in
         if s.expiredSnapshot() { revertAllToAuto(s) }
-        if s.manualSnapshot(),
-           let hottest = s.fc.temperatures(limit: 60).map(\.celsius).max(), hottest >= failsafeTemp {
+        if s.manualSnapshot(), let hottest = hottestDie(s.fc), hottest >= failsafeTemp {
             revertAllToAuto(s)
             print("fand: FAILSAFE \(hottest)C -> auto")
         }
@@ -148,7 +181,8 @@ func startExpiryTimer(_ s: DaemonState) {
 // --- Minimal HTTP/1.0 server on 127.0.0.1 via Network.framework ---
 func startHTTP(_ s: DaemonState, port: UInt16) throws {
     let params = NWParameters.tcp
-    let listener = try NWListener(using: params, on: NWEndpoint.Port(rawValue: port)!)
+    params.requiredLocalEndpoint = NWEndpoint.hostPort(host: "127.0.0.1", port: NWEndpoint.Port(rawValue: port)!)
+    let listener = try NWListener(using: params)
     listener.service = nil
     listener.newConnectionHandler = { c in
         c.start(queue: .global())
@@ -178,9 +212,9 @@ do {
     print("fand: model=\(SMCConnection.hardwareModel()) fans=\(fc.fanCount) modeKey=\(fc.hw.modeKeyFormat) ftst=\(fc.hw.ftstAvailable) euid=\(geteuid())")
     if geteuid() != 0 { print("fand: WARNING not root — writes will fail. Run via sudo or install LaunchDaemon.") }
     let state = DaemonState(fc)
-    // revert on exit
-    signal(SIGTERM) { _ in print("fand: SIGTERM"); exit(0) }
-    signal(SIGINT) { _ in print("fand: SIGINT"); exit(0) }
+    Runtime.state = state
+    signal(SIGTERM) { _ in Runtime.halt("SIGTERM") }
+    signal(SIGINT) { _ in Runtime.halt("SIGINT") }
     startExpiryTimer(state)
     // re-assert Max after wake if TTL still valid (firmware drops manual across sleep)
     let nc = NSWorkspace.shared.notificationCenter

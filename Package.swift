@@ -13,6 +13,13 @@ let package = Package(
         .target(name: "SMCCore"),
         .executableTarget(name: "fand", dependencies: ["SMCCore"]),
         .executableTarget(name: "fanctl", dependencies: ["SMCCore"]),
-        .executableTarget(name: "FanMenu", dependencies: ["SMCCore"]),
+        .executableTarget(
+            name: "FanMenu",
+            dependencies: ["SMCCore"],
+            linkerSettings: [
+                .linkedFramework("AppKit"),
+                .linkedFramework("ServiceManagement"),
+            ]
+        ),
     ]
 )

@@ -138,17 +138,37 @@ public final class FanControl: @unchecked Sendable {
         try conn.writeKey(FanKey.forceTest, bytes: [0])
     }
 
-    // MARK: Sensors (dynamic discovery, no per-model tables)
+    // MARK: Sensors
 
-    /// Enumerate plausible temperature sensors: every key starting with T
-    /// that decodes to -40…130 °C. Returns (key, °C).
+    /// Cached once: SoC/package keys only. `Tf*` includes 99 °C trip-point
+    /// keys that are not live die temps and must not drive the failsafe.
+    private var dieKeys: [String]?
+
+    public func dieTemperatures() -> [(key: String, celsius: Float)] {
+        let keys: [String]
+        if let cached = dieKeys {
+            keys = cached
+        } else {
+            keys = conn.enumerateKeys().filter { k in
+                (k.hasPrefix("TC") || k.hasPrefix("Tp")) && !k.hasPrefix("Tf")
+            }
+            dieKeys = keys
+        }
+        return decodeTemps(keys)
+    }
+
+    /// All plausible T* keys (for `fanctl sensors`). Includes non-die probes.
     public func temperatures(limit: Int = 400) -> [(key: String, celsius: Float)] {
-        let keys = conn.enumerateKeys().filter { $0.hasPrefix("T") }.prefix(limit)
+        decodeTemps(Array(conn.enumerateKeys().filter { $0.hasPrefix("T") }.prefix(limit)))
+    }
+
+    private func decodeTemps(_ keys: [String]) -> [(key: String, celsius: Float)] {
         var out: [(String, Float)] = []
         for k in keys {
             guard let info = try? conn.fetchKeyInfo(k) else { continue }
-            let rawType = withUnsafeBytes(of: info.output.keyInfo.dataType.bigEndian) { String(bytes: $0, encoding: .ascii) ?? "" }
-            // dataType is 4 chars, space-padded (e.g. "flt ", "sp78")
+            let rawType = withUnsafeBytes(of: info.output.keyInfo.dataType.bigEndian) {
+                String(bytes: $0, encoding: .ascii) ?? ""
+            }
             let type = rawType.trimmingCharacters(in: .whitespaces)
             guard let (bytes, size) = try? conn.readKey(k) else { continue }
             let c: Float
@@ -156,12 +176,10 @@ public final class FanControl: @unchecked Sendable {
             case "flt": c = SMCFormat.float(from: bytes, size: size)
             case "sp78": c = SMCFormat.sp78(from: bytes)
             case "fpe2": c = Float(SMCFormat.uint16(from: bytes)) / 4.0
-            case "ui8": c = Float(SMCFormat.uint8(from: bytes))
-            case "ui16": c = Float(SMCFormat.uint16(from: bytes))
-            case "ui32": c = Float(SMCFormat.uint32(from: bytes))
             default: continue
             }
-            if c > -40, c < 130 { out.append((k, c)) }
+            guard c.isFinite, c > -40, c < 115 else { continue }
+            out.append((k, c))
         }
         return out.sorted { $0.1 > $1.1 }
     }
