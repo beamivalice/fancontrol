@@ -406,11 +406,10 @@ struct FanPopover: View {
                     .keyboardShortcut("m")
                 Spacer()
                 Button("Quit") { NSApp.terminate(nil) }
-                    .buttonStyle(.plain)
-                    // Never tint this secondary: the panel is a nonactivating
-                    // window, so dimmed text reads as "disabled" even though the
-                    // button always works. Keep it at full label strength.
-                    .foregroundStyle(.primary)
+                    .keyboardShortcut("q")
+                    // Deliberately the same default (.bordered) style as Auto/Max:
+                    // a borderless Quit read as disabled/inert next to two framed
+                    // buttons. Keep all three visually equal.
             }
         }
         .padding(12)
